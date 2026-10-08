@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {mkdir,writeFile,readFile,readdir} from 'node:fs/promises';
+import path from 'node:path';
+assert(process.env.DATA_DIR,'Recovery fixtures require the isolated runner.');
+const base=process.env.TEST_URL,db=new DatabaseSync(path.join(process.env.DATA_DIR,'studio.sqlite'));
+const row=db.prepare("SELECT data FROM workspaces WHERE id='local'").get(),state=JSON.parse(row.data);
+const template=state.contents.find(content=>content.pipelineVersion===2&&content.scenes.length>=3);
+const content={...structuredClone(template),id:'frame-retry-content',status:'FAILED',mock:false,approvedVersion:template.scriptVersion,audioApprovedVersion:template.scriptVersion};
+const job={id:'frame-retry-job',contentId:content.id,kind:'VIDEO',provider:'Runway fixture',status:'FAILED',stage:'Preparing audio-timed shots',progress:60,createdAt:new Date().toISOString()};
+state.contents.push(content);state.jobs.push(job);db.prepare("UPDATE workspaces SET data=?,revision=revision+1 WHERE id='local'").run(JSON.stringify(state));
+const folder=path.join(process.env.DATA_DIR,'jobs',job.id);await mkdir(folder,{recursive:true});await writeFile(path.join(folder,'job.json'),JSON.stringify({content,job}));
+const first=content.scenes[0].id,blocked=content.scenes[1].id;
+const checkpoint={['shot-'+first]:{taskId:'saved-paid-video',frameSubmitting:false,output:'https://fixture.test/saved'},['shot-'+blocked]:{frameSubmitting:true},['voice-'+content.speech[0]?.id]:{inputHash:'saved-voice-fixture'}};
+const original=JSON.stringify(checkpoint);await writeFile(path.join(folder,'checkpoint.json'),original);await writeFile(path.join(folder,'raw-0.mp4'),'completed-video-fixture');await writeFile(path.join(folder,'frame-0.png'),'completed-image-fixture');
+const get=await fetch(`${base}/api/job-recovery?jobId=${job.id}`);assert.equal(get.status,200);const inspection=await get.json();assert.equal(inspection.shots[0].videoSaved,true);assert.equal(inspection.shots[1].blockedFrame,true);assert(!JSON.stringify(inspection).includes('saved-paid-video'));
+assert.equal((await fetch(`${base}/api/job-recovery?jobId=${job.id}`,{headers:{Origin:'https://untrusted.example'}})).status,401);
+async function retry(sceneId,acceptPossibleCharge,expected){const response=await fetch(base+'/api/job-recovery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobId:job.id,sceneId,acceptPossibleCharge})});const body=await response.json();assert.equal(response.status,expected,JSON.stringify(body));return body;}
+await retry(blocked,false,400);assert.equal(await readFile(path.join(folder,'checkpoint.json'),'utf8'),original);
+const resume=await fetch(base+'/api/engine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'resumeJob',jobId:job.id})});assert.equal(resume.status,400);assert.match((await resume.json()).error,/Shot 2 has no saved starting image/);assert.equal(await readFile(path.join(folder,'checkpoint.json'),'utf8'),original);
+await retry(first,true,400);assert.equal(await readFile(path.join(folder,'checkpoint.json'),'utf8'),original);
+const recovered=await retry(blocked,true,200);assert.equal(recovered.state.jobs.find(job=>job.id==='frame-retry-job').status,'QUEUED');assert.equal(recovered.state.contents.find(item=>item.id===content.id).status,'GENERATING');
+const updated=JSON.parse(await readFile(path.join(folder,'checkpoint.json'),'utf8'));assert.equal(updated['shot-'+blocked].frameSubmitting,false);assert.equal(updated['shot-'+blocked].frameRetries.length,1);assert.deepEqual(updated['shot-'+first],checkpoint['shot-'+first]);assert.equal(await readFile(path.join(folder,'raw-0.mp4'),'utf8'),'completed-video-fixture');assert.equal(await readFile(path.join(folder,'frame-0.png'),'utf8'),'completed-image-fixture');
+const backups=(await readdir(folder)).filter(name=>name.startsWith('checkpoint-before-frame-retry-'));assert.equal(backups.length,1);assert.equal(await readFile(path.join(folder,backups[0]),'utf8'),original);
+await retry(blocked,true,400);assert.equal((await readdir(folder)).filter(name=>name.startsWith('checkpoint-before-frame-retry-')).length,1);
+db.close();console.log('PASS: saved-media inspection, explicit image-charge authorization, selected-shot retry, original checkpoint backup, preserved completed clips and duplicate/active-job guards. No worker or paid requests.');

@@ -1,0 +1,13 @@
+'use client';
+import {useEffect,useState} from 'react';
+import {toast} from 'sonner';
+import type {Content,State,Soundtrack} from '@/lib/engine/types';
+export function AudioMix({content,busy,act,onState}:{content:Content;busy:boolean;act:(action:string,data:Record<string,unknown>)=>Promise<any>;onState:(state:State)=>void}){
+ const [tracks,setTracks]=useState<Soundtrack[]>(content.soundtracks||[]),[uploading,setUploading]=useState(false);
+ useEffect(()=>setTracks(content.soundtracks||[]),[content.id,content.soundtracks]);
+ const locked=busy||uploading||content.status==='GENERATING';
+ const upload=async(file:File,kind:string)=>{setUploading(true);try{const form=new FormData();form.set('file',file);form.set('contentId',content.id);form.set('soundKind',kind);const r=await fetch('/api/media',{method:'POST',body:form});const result=await r.json();if(!r.ok)throw Error(result.error);onState(result.state);toast.success(result.message);}catch(e){toast.error((e as Error).message);}finally{setUploading(false);}};
+ return <div className="panel"><h2>Sound mix</h2><p className="muted small">Speech stays in front. Add an optional quiet music bed or recorded room tone. Background tracks loop to cover the edit.</p>
+ {tracks.map((track,i)=><div className="edit-voice" key={track.id}><div className="row between"><strong>{track.kind==='music'?'Music':'Room tone / ambience'} {i+1}</strong><button className="text-button" disabled={locked} onClick={()=>setTracks(tracks.filter(t=>t.id!==track.id))}>Remove</button></div><audio controls preload="none" src={track.url}/><div className="form-grid"><label className="field"><span>Background volume · dB</span><input disabled={locked} type="number" min="-60" max="0" value={track.volumeDb} onChange={e=>setTracks(tracks.map(t=>t.id===track.id?{...t,volumeDb:Number(e.target.value)}:t))}/></label><label className="field"><span>Trim start · seconds</span><input disabled={locked} type="number" min="0" step=".1" value={track.sourceIn} onChange={e=>setTracks(tracks.map(t=>t.id===track.id?{...t,sourceIn:Number(e.target.value)}:t))}/></label></div></div>)}
+ <div className="row gap wrap">{(['music','ambience'] as const).map(kind=><label className="button secondary" key={kind}>{kind==='music'?'Add music':'Add room tone'}<input hidden disabled={locked||tracks.length>=4} type="file" accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg" onChange={e=>{const file=e.target.files?.[0];if(file)upload(file,kind);e.target.value='';}}/></label>)}{!!(tracks.length||content.soundtracks?.length)&&<button className="button" disabled={locked} onClick={()=>act('saveSoundtracks',{contentId:content.id,soundtracks:tracks})}>Save mix settings</button>}</div></div>;
+}

@@ -1,0 +1,18 @@
+'use client';
+import {useEffect,useState} from 'react';
+import type {Content} from '@/lib/engine/types';
+type SavedShot={sceneId:string;number:number;location:string;frameSaved:boolean;videoSaved:boolean;blockedFrame:boolean};
+export function ClipRecovery({content,busy,onImport,onRetryFrame,jobId,stage=''}:{content:Content;busy:boolean;jobId:string;stage?:string;onImport:(file:File,sceneId:string,kind:'raw'|'frame')=>Promise<void>;onRetryFrame:(sceneId:string)=>Promise<void>}){
+ const failedFrame=stage.match(/^Starting frame (\d+)/);
+ const [kind,setKind]=useState<'raw'|'frame'>(failedFrame?'frame':'raw');
+ const [shot,setShot]=useState(content.scenes[failedFrame?Number(failedFrame[1])-1:0]?.id||content.scenes[0]?.id||'');
+ const [saved,setSaved]=useState<SavedShot[]>([]),[inspectionError,setInspectionError]=useState(''),[acceptCharge,setAcceptCharge]=useState(false);
+ useEffect(()=>{let active=true;fetch(`/api/job-recovery?jobId=${encodeURIComponent(jobId)}`).then(async response=>{const data=await response.json();if(!response.ok)throw Error(data.error);if(active){setSaved(data.shots);setInspectionError('');const blocked=data.shots.find((shot:SavedShot)=>shot.blockedFrame);if(blocked){setShot(blocked.sceneId);setKind('frame');}}}).catch(error=>{if(active)setInspectionError(error.message);});return()=>{active=false;};},[jobId,busy]);
+ const blocked=saved.find(shot=>shot.blockedFrame);
+ return <div>
+  {inspectionError&&<p className="muted small">{inspectionError}</p>}
+  {blocked&&<div className="environment"><strong>Shot {blocked.number} needs a starting image before this job can continue.</strong><p>The image request lost its connection, and no image was saved. Resume alone stops here again. Completed clips are kept.</p><label className="row gap"><input disabled={busy} type="checkbox" checked={acceptCharge} onChange={e=>setAcceptCharge(e.target.checked)}/>I accept that retrying this image may create an additional image charge.</label><button className="button" disabled={busy||!acceptCharge} onClick={()=>onRetryFrame(blocked.sceneId)}>Retry shot {blocked.number} starting image & resume</button><p className="muted small">This retries only the missing image and continues the existing video job.</p></div>}
+  {!!saved.length&&<p className="muted small">{saved.filter(shot=>shot.videoSaved).length} of {saved.length} video clips already saved.</p>}
+  <details open={!!blocked}><summary>Import a file you already have</summary><p className="muted small">Choose the media type and shot, then click the import button to select a file from your computer. Wait for the “imported” message, then click Resume saved job. Selecting these dropdowns alone does not import or generate anything.</p><div className="row gap wrap"><label className="field"><span>File type to import</span><select disabled={busy} value={kind} onChange={e=>setKind(e.target.value as typeof kind)}><option value="raw">Downloaded video clip</option><option value="frame">Starting image</option></select></label><label className="field"><span>Import into shot</span><select disabled={busy} value={shot} onChange={e=>setShot(e.target.value)}>{content.scenes.map((s,i)=><option key={s.id} value={s.id}>Shot {i+1} · {s.location}{saved.find(saved=>saved.sceneId===s.id)?.videoSaved?' · clip saved':''}</option>)}</select></label><label className="button secondary">{kind==='frame'?'Choose starting image file to import':'Choose MP4 file to import'}<input disabled={busy} hidden type="file" accept={kind==='frame'?'image/png,image/jpeg,image/webp':'video/mp4'} onChange={e=>{const file=e.target.files?.[0];if(file)onImport(file,shot,kind);e.target.value='';}}/></label></div></details>
+ </div>;
+}

@@ -1,0 +1,11 @@
+import {spawn} from 'node:child_process';
+import {mkdtemp,readFile,writeFile} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+const data=await mkdtemp(path.join(os.tmpdir(),'character-api-test-'));const port=process.env.TEST_PORT||'3017';
+const generatedConfig=await Promise.all(['tsconfig.json','next-env.d.ts'].map(async file=>({file,bytes:await readFile(file)})));
+const env={...process.env,PORT:port,DATA_DIR:data,NEXT_DIST_DIR:'.next-test',NEXT_TELEMETRY_DISABLED:'1',WORKER_TOKEN:'test-worker-token-at-least-24-characters',LLM_API_KEY:'',IMAGE_API_KEY:'fixture-only',VIDEO_API_KEY:'fixture-only',IMAGE_COST_ESTIMATE:'0.1',TTS_API_KEY:'',LIPSYNC_API_KEY:'',ELEVENLABS_API_KEY:'fixture-only',NODE_OPTIONS:[process.env.NODE_OPTIONS,`--import=${pathToFileURL(path.resolve('tests/voice-fetch-fixture.mjs')).href}`].filter(Boolean).join(' ')};
+const server=spawn(process.execPath,['node_modules/next/dist/bin/next','dev','--webpack','--hostname','127.0.0.1','--port',port],{windowsHide:true,env,stdio:['ignore','pipe','pipe']});let log='';server.stdout.on('data',b=>log=(log+b).slice(-6000));server.stderr.on('data',b=>log=(log+b).slice(-6000));
+const run=file=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[file],{windowsHide:true,env:{...env,TEST_URL:`http://127.0.0.1:${port}`},stdio:'inherit'});child.on('error',reject);child.on('exit',code=>code?reject(Error(`${file} exited ${code}`)):resolve());});
+try{let ready=false;for(let i=0;i<90;i++){try{const r=await fetch(`http://127.0.0.1:${port}/api/engine`);if(r.ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,1000));}if(!ready)throw Error('Test server did not start. '+log);await run('tests/local.test.mjs');await run('tests/edit-api.test.mjs');await run('tests/voice-api.test.mjs');await run('tests/voice-provider.test.mjs');await run('tests/job-recovery.test.mjs');console.log('Disposable SQLite test workspace: '+data);}catch(e){console.error(e.message);console.error(log);process.exitCode=1;}finally{server.kill();await Promise.all(generatedConfig.map(({file,bytes})=>writeFile(file,bytes)));}

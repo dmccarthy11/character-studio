@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import {mkdtemp,readFile,mkdir,writeFile} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {command,ffmpegPath} from '../workers/media-tools.mjs';
+const base=process.env.TEST_URL;let state;
+async function action(action,data={},expected=200){const r=await fetch(base+'/api/engine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...data})});const d=await r.json();assert.equal(r.status,expected,JSON.stringify(d));if(d.state)state=d.state;return d;}
+state=(await (await fetch(base+'/api/engine')).json()).state;const character=state.characters.find(c=>c.status==='READY');
+const created=await action('createIdea',{characterId:character.id,duration:30,pacing:'quick',speakingRatio:0,durationMode:'natural'}),cid=created.id;
+await action('generateScript',{contentId:cid});let c=state.contents.find(c=>c.id===cid);assert.equal(c.pipelineVersion,2);assert(c.scenes.length>3);assert(new Set(c.scenes.map(s=>s.duration)).size>1);
+const speech=[{id:'thought',text:'One thought continues across several different shots.',delivery:'Casual'}];
+const shots=c.scenes.slice(0,2).map((s,i)=>({...s,speechId:'thought',kind:'voiceover',duration:i?3:2}));
+// Model-generated silent shots commonly represent absent fields as JSON null.
+const silent={...shots[0],id:'silent-null',kind:'silent',speechId:null,sourceUrl:null,sourceIn:null};
+await action('saveScript',{contentId:cid,scenes:[...shots,silent],speech});
+const savedSilent=state.contents.find(x=>x.id===cid).scenes.at(-1);
+assert.equal(savedSilent.speechId,undefined);assert.equal(savedSilent.sourceUrl,undefined);assert.equal(savedSilent.sourceIn,undefined);
+const missingVoice=await action('saveScript',{contentId:cid,scenes:[{...silent,kind:'speaking'}],speech:[]},400);
+assert.match(missingVoice.error,/Speaking shots need a speech segment/);
+await action('saveScript',{contentId:cid,scenes:shots,speech});await action('approveScript',{contentId:cid});const voice=await action('generateAudio',{contentId:cid});await action('generateAudio',{contentId:cid},400);
+for(let i=0;i<5;i++)await action('advanceJob',{jobId:voice.jobId});await action('approveAudio',{contentId:cid});const video=await action('generateVideo',{contentId:cid});for(let i=0;i<5;i++)await action('advanceJob',{jobId:video.jobId});
+await action('saveScript',{contentId:cid,scenes:shots,speech:[{...speech[0],text:'Changed words need a new voice take.'}]});await action('generateVideo',{contentId:cid},400);await action('approveScript',{contentId:cid});
+await action('saveScript',{contentId:cid,scenes:shots.map(s=>({...s,speechId:'missing'})),speech},400);
+await action('saveScript',{contentId:cid,scenes:[{...shots[0],id:'a'},{...shots[0],id:'b',speechId:undefined,kind:'silent'},{...shots[1],id:'c'}],speech},400);
+await action('saveScript',{contentId:cid,scenes:[{...shots[0],kind:'screen',sourceUrl:'https://untrusted.example/video.mp4'}],speech},400);
+await action('saveScript',{contentId:cid,scenes:[{...shots[0],kind:'screen',sourceUrl:undefined}],speech},400);
+const form=new FormData();form.set('contentId',cid);form.set('sceneId',shots[0].id);form.set('file',new Blob(['not video'],{type:'video/mp4'}),'bad.mp4');const imported=await fetch(base+'/api/media',{method:'POST',body:form});assert.equal(imported.status,400);
+const folder=await mkdtemp(path.join(os.tmpdir(),'character-import-test-')),videoFile=path.join(folder,'source.mp4'),soundFile=path.join(folder,'sound.mp3');
+await command(ffmpegPath(),['-y','-f','lavfi','-i','color=c=green:s=180x320:d=2','-an','-c:v','libx264',videoFile]);
+form.set('file',new Blob([await readFile(videoFile)],{type:'video/mp4'}),'source.mp4');const sourceResponse=await fetch(base+'/api/media',{method:'POST',body:form});assert.equal(sourceResponse.status,200);state=(await sourceResponse.json()).state;c=state.contents.find(x=>x.id===cid);assert(c.scenes[0].sourceUrl.startsWith('/api/files/local/'));assert.equal(c.approvedVersion,undefined);
+await command(ffmpegPath(),['-y','-f','lavfi','-i','sine=frequency=440:duration=1',soundFile]);
+const soundForm=new FormData();soundForm.set('contentId',cid);soundForm.set('soundKind','music');soundForm.set('file',new Blob([await readFile(soundFile)],{type:'audio/mpeg'}),'music.mp3');const soundResponse=await fetch(base+'/api/media',{method:'POST',body:soundForm});assert.equal(soundResponse.status,200);state=(await soundResponse.json()).state;const tracks=state.contents.find(x=>x.id===cid).soundtracks;assert.equal(tracks[0].kind,'music');await action('saveSoundtracks',{contentId:cid,soundtracks:tracks.map(t=>({...t,volumeDb:-32}))});assert.equal(state.contents.find(x=>x.id===cid).soundtracks[0].volumeDb,-32);
+assert.equal((await fetch(base+'/api/media',{method:'POST',headers:{Origin:'https://untrusted.example'},body:soundForm})).status,401);
+await action('approveScript',{contentId:cid});const recoveryAudio=await action('generateAudio',{contentId:cid});for(let i=0;i<5;i++)await action('advanceJob',{jobId:recoveryAudio.jobId});await action('approveAudio',{contentId:cid});const recovery=await action('generateVideo',{contentId:cid});await action('cancelJob',{jobId:recovery.jobId});
+assert(process.env.DATA_DIR,'Recovery fixture requires the isolated test runner.');const recoveryFolder=path.join(process.env.DATA_DIR,'jobs',recovery.jobId);await mkdir(recoveryFolder,{recursive:true});await writeFile(path.join(recoveryFolder,'job.json'),JSON.stringify({content:state.contents.find(x=>x.id===cid)}));
+form.set('jobId',recovery.jobId);assert.equal((await fetch(base+'/api/media',{method:'POST',body:form})).status,200);const rawBytes=await readFile(path.join(recoveryFolder,'raw-0.mp4'));assert.equal((await fetch(base+'/api/media',{method:'POST',body:form})).status,400);assert.deepEqual(await readFile(path.join(recoveryFolder,'raw-0.mp4')),rawBytes);
+// Starting-image recovery avoids resubmitting an ambiguous paid image request.
+form.set('recoveryKind','frame');form.set('file',new Blob(['corrupt'],{type:'image/png'}),'bad.png');assert.equal((await fetch(base+'/api/media',{method:'POST',body:form})).status,400);
+form.set('file',new Blob([await readFile('public/alex.png')],{type:'image/png'}),'saved-starting-image.png');assert.equal((await fetch(base+'/api/media',{method:'POST',body:form})).status,200);
+const frameBytes=await readFile(path.join(recoveryFolder,'frame-0.png'));assert(frameBytes.length>0);assert.equal((await fetch(base+'/api/media',{method:'POST',body:form})).status,400);assert.deepEqual(await readFile(path.join(recoveryFolder,'frame-0.png')),frameBytes);assert.deepEqual(await readFile(path.join(recoveryFolder,'raw-0.mp4')),rawBytes);
+console.log('PASS: variable shot count/length, shared speech across cuts, duplicate-job guard, audio approval invalidation, missing/noncontiguous speech rejection, screen-recording requirements and corrupt clip rejection.');
+console.log('PASS: validated source-video and sound uploads, mix settings persistence and cross-origin media import rejection.');
+console.log('PASS: downloaded-clip recovery and refusal to overwrite existing saved footage.');
+
+// Character samples stay local until explicit live-mode cloning; settings persist across profile edits.
+const voiceFile=path.join(folder,'character-voice.mp3');
+await command(ffmpegPath(),['-y','-f','lavfi','-i','sine=frequency=440:duration=12',voiceFile]);
+const voiceForm=new FormData();voiceForm.set('characterId',character.id);voiceForm.set('file',new Blob([await readFile(voiceFile)],{type:'audio/mpeg'}),'character-voice.mp3');
+const voiceResponse=await fetch(base+'/api/character-voice',{method:'POST',body:voiceForm});assert.equal(voiceResponse.status,200);state=(await voiceResponse.json()).state;
+const sample=state.characters.find(x=>x.id===character.id).voice.sample;assert(sample.url.startsWith('/api/files/local/voices/'));assert(sample.duration>=11.9);
+assert.equal((await fetch(base+sample.url)).status,200);
+assert.equal((await fetch(base+'/api/character-voice',{method:'POST',headers:{Origin:'https://untrusted.example'},body:voiceForm})).status,401);
+const cloneResponse=await fetch(base+'/api/character-voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clone',characterId:character.id,authorized:true})});assert.equal(cloneResponse.status,400);assert.match((await cloneResponse.json()).error,/live mode/);
+voiceForm.set('file',new Blob(['corrupt'],{type:'audio/mpeg'}),'bad.mp3');assert.equal((await fetch(base+'/api/character-voice',{method:'POST',body:voiceForm})).status,400);
+voiceForm.set('file',new Blob([await readFile(soundFile)],{type:'audio/mpeg'}),'too-short.mp3');assert.equal((await fetch(base+'/api/character-voice',{method:'POST',body:voiceForm})).status,400);
+const savedCharacter=state.characters.find(x=>x.id===character.id);
+await action('saveCharacter',{character:{...savedCharacter,voice:{voiceId:'coral',tone:'Quick and lively',rate:1.1}}});
+assert.deepEqual(state.characters.find(x=>x.id===character.id).voice.sample,sample);
+assert.equal(state.contents.find(x=>x.id===cid).snapshot.voice.rate,character.voice.rate);
+await action('saveVoice',{characterId:character.id,voice:{voiceId:'coral',tone:'Quick and lively',rate:1.1,provider:'openai'}});
+await action('saveVoice',{characterId:character.id,voice:{voiceId:'coral',tone:'Quick',rate:1.1,provider:'elevenlabs'}},400);
+await action('applyCharacterVoice',{contentId:cid});const refreshed=state.contents.find(x=>x.id===cid);
+assert.equal(refreshed.snapshot.voice.rate,1.1);assert.equal(refreshed.snapshot.voice.voiceId,'coral');assert.equal(refreshed.audioApprovedVersion,undefined);assert.equal(refreshed.timeline,undefined);assert(refreshed.speech.every(x=>!x.audioUrl&&!x.inputHash&&!x.duration));
+await action('generateVideo',{contentId:cid},400);
+const nextIdea=await action('createIdea',{characterId:character.id});assert.equal(state.contents.find(x=>x.id===nextIdea.id).snapshot.voice.rate,1.1);assert.deepEqual(state.contents.find(x=>x.id===nextIdea.id).snapshot.voice.sample,sample);
+await action('generateScript',{contentId:nextIdea.id});await action('approveScript',{contentId:nextIdea.id});await action('generateAudio',{contentId:nextIdea.id});await action('applyCharacterVoice',{contentId:nextIdea.id},400);
+console.log('PASS: validated character voice samples, corruption/short-recording rejection, local playback, origin isolation, mock cloning gate, profile persistence, new-video voice reuse and current-script preview invalidation.');
