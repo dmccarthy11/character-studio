@@ -1,5 +1,31 @@
 # Verification of local edition v0.2.0
 
+## Generation status clarity — October 15, 2026
+
+- Runway video submissions now distinguish explicit client HTTP rejections from uncertain submission outcomes. Rejections save `videoRejection` and clear only the pending submission flag, allowing a user-requested resume after fixing account/input issues; lost responses, missing task IDs and server errors remain blocked. FFmpeg/provider fixtures passed for HTTP 400 recovery and no duplicate submissions after network/HTTP 500 failures. The production shot-2 flag left by the earlier observed HTTP 400 was backed up as `checkpoint-before-http400-recovery-*.json`, then cleared and the same saved job resumed after confirming the 5,005-credit balance; shot 1 and all audio/frames were preserved.
+- Added Settings → Provider balances & usage with explicit read-only Runway/ElevenLabs checks, unavailable/permission states, and manual OpenAI/Sync billing links. Keys and raw provider responses remain server-side. Fixture tests cover remaining allowance, missing keys, permission failures, malformed responses, network failures and secret redaction (`node tests/provider-balances.test.mjs`). TypeScript/build passed; isolated browser checks verified displayed balances and foreign-Origin rejection. Live read-only checks reported 5 Runway credits and HTTP 401 for ElevenLabs subscription access; no generation was submitted or recovery checkpoint changed.
+- Read-only inspection of Sarah's “Sunny Fall Walk to a New Cafe” found an AUDIO_READY script with no speech segments and two completed, zero-cost AUDIO jobs. It was waiting for starting-frame preparation, not a voice response.
+- Added a current-video status card, production steps, explicit no-speech guidance, frame-review navigation, worker-update age and cautious stale-update messaging. Removed misleading voice-validation instructions for scripts without speech and redundant preview generation controls after audio is ready.
+- Status polling continues after a temporary fetch failure.
+- Frame preparation now shows immediate submission feedback, a spinning button, saved-frame count, stage progress and generating/queued placeholders beside the frame controls. Disposable browser checks verified the disabled loading button and a partially completed four-frame job; screenshots are under `.review/frame-loading-*.png`. The user's active frame job was monitored read-only and continued saving images during the UI change.
+- TypeScript and isolated production build passed. Headless Edge checks against disposable data passed for Sarah's no-speech state, voice-ready controls, stale running jobs, next-step navigation, polling recovery and a 390px viewport without horizontal overflow or runtime exceptions. Desktop/mobile screenshots are under `.review/generation-status-*.png`.
+- No paid provider requests or changes to production records, credentials, media or checkpoints. The fixture did not copy original media, so character portraits in its screenshots are unavailable.
+
+## Realism rework — October 12, 2026
+
+Branch: `rework/realistic-influencer-studio`.
+
+- Windows TypeScript check and isolated production build passed.
+- Existing disposable SQLite/API and FFmpeg/provider-fixture suites passed.
+- Added API tests for quiet posts, mock frame generation/review, visual-edit approval invalidation, pre-animation frame enforcement and cumulative media-budget rejection.
+- Added actual FFmpeg/provider fixtures for high-quality image requests, saved frame resume, silent exports without TTS, Gen-4.5 request shape, unchanged raw reuse, per-shot motion retakes, cumulative worker budget enforcement and unknown image submission protection.
+- Completed one **live** identity-reference image with GPT Image 2 and a five-second **live** Gen-4.5 video, with a local export. Artifacts are under `.review/quality-pilot/`, excluded from Git. The pilot reads the existing character snapshot and writes separately from the user's data. It contains no speech or lip-sync stage.
+- Inspected the live starting image and sampled video frames. The image has more visible skin detail and neutral lighting than the sampled previous export; sampled motion frames retain the face through a head turn. This is a limited visual inspection, not a blinded realism study, full-motion playback assessment or multi-video identity benchmark. A phone appeared despite not being needed by the pilot action; subsequent frame prompts make phone guidance conditional and restrict props to the action. That prompt refinement has not been re-benchmarked with another paid image.
+- Initial live image connection attempts failed; explicit isolated-pilot retry checkpoints were preserved. The successful request and video used existing credentials. No production database, existing media, original checkpoints or `.env` changes were made.
+- Headless Edge initially timed out inside the sandbox, then passed outside it against a disposable mock database with blank provider keys. Verified frame-review rendering, a persisted frame-approval click, no runtime exceptions and no horizontal overflow at a 390px mobile viewport. Desktop/mobile screenshots were inspected and saved under `.review/`. The fixture's canonical-reference URL had no copied media in that disposable database; the generated sample-frame controls rendered correctly. The test server and browser were closed.
+
+Commands: `npm run typecheck`, `npm run test:local`, `npm run test:media`, and `npm run build` with `NEXT_DIST_DIR=.next-build-check`. Paid benchmark commands and the production acceptance checklist are in [REALISM-WORKFLOW.md](REALISM-WORKFLOW.md).
+
 ## Flexible UGC update — October 7, 2026
 
 Verified natively on Windows with Node.js 24.14.0 and the installed FFmpeg/FFprobe:

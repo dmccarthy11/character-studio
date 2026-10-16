@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node tests/local.test.mjs",
     "test:local": "node tests/run-local.mjs",
-    "test:media": "node tests/media.test.mjs",
+    "test:media": "node tests/media.test.mjs && node tests/realism.test.mjs",
     "backup": "node scripts/backup.mjs"
   },
   "dependencies": {

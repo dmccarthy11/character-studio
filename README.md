@@ -1,5 +1,13 @@
 # Character Studio Local — Windows edition
 
+## Realism rework
+
+New posts now use **script → voice review → starting-frame review → animation**. Read [the production guide](REALISM-WORKFLOW.md) for the findings, recommended settings, monthly workflow, costs and acceptance criteria.
+
+After restarting, use **Settings → Use recommended quality settings** for GPT Image 2 + Gen-4.5. Existing workspace settings, character references and paid outputs are preserved. Start a new 10–15 second concept to use the new workflow. The studio includes a 30-post brief planner, per-frame rejection/approval, raw shot previews and selective motion retakes. Quiet-moment posts need no voice; speaking shots remain optional.
+
+New posts enforce a cumulative estimated media ceiling of at most $10 per content record, including previous attempts. This is a conservative reservation system, not provider invoice tracking; subscriptions, setup, text planning and tax are separate. Review the shot-level quote before generation.
+
 A standalone, single-user edition of Character Studio. Runs on your Windows PC at **http://localhost:3000** with a local SQLite database and local media folders. No ChatGPT account, Supabase account, PostgreSQL server, Docker, or cloud hosting is needed.
 
 ## Start on Windows

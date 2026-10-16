@@ -1,3 +1,7 @@
+UPDATE — OCTOBER 12, 2026
+
+The realism rework is on rework/realistic-influencer-studio. Read REALISM-WORKFLOW.md and the latest VALIDATION.md section before changing generation. New concepts have realismVersion: 1 and require per-shot frame approval before animation. FRAMES jobs run workers/frame-worker.mjs; workers/realism.mjs holds shared model rates, prompt inputs and cost estimates. New media jobs freeze settings and content inputs; rawUrl/rawKey/take support selective motion retakes. Preserve original workflows for older records. Existing production settings and data were not migrated. A separate live five-second pilot is under .review/quality-pilot, outside the production database.
+
 You are taking over development and debugging of Character Studio, a local Windows app for creating AI-character social videos. Inspect the current implementation before editing: several patches were applied manually after the original download.
 
 UPDATE — OCTOBER 7, 2026

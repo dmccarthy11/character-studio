@@ -105,6 +105,24 @@ await processEditJob(generated,api,{fetchImpl:fakeFetch});assert.deepEqual(submi
 await processEditJob({...generated,job:{id:'reused-speaking',kind:'REBUILD',sourceJobId:'generated-speaking',leaseToken:'test'},content:{...generated.content,soundtracks:[{id:'room',kind:'ambience',url:'/api/files/local/voice.mp3',volumeDb:-28,sourceIn:0.2}]}},api,{fetchImpl:fakeFetch});assert.deepEqual(submissions,{image:2,video:2,lip:1});
 console.log('PASS: mocked frame/video/lip-sync lifecycle, bounded defective TTS retry, ambiguous speech protection, and paid-output reuse across resume and rebuild.');
 const imageRecovery={...generated,job:{id:'starting-image-recovery',kind:'VIDEO',leaseToken:'test'},content:{...generated.content,scenes:[{...generated.content.scenes[0],kind:'voiceover'}]}};
+// A rejected video POST is recoverable; lost responses and server errors remain ambiguous.
+for(const failure of [400,undefined,500]){
+ const rejected={...generated,job:{id:'video-rejection-'+(failure||'network'),kind:'VIDEO',leaseToken:'test'},content:{...generated.content,scenes:[{...generated.content.scenes[0],kind:'voiceover'}]}};
+ let calls=0;
+ const rejectFetch=async(url,options)=>{if(url.endsWith('/image_to_video')){calls++;if(!failure)throw reset();return new Response('',{status:failure});}return fakeFetch(url,options);};
+ await assert.rejects(()=>processEditJob(rejected,api,{fetchImpl:rejectFetch,pause:async()=>{}}),failure===400?/Runway rejected shot 1.*400/:/network|HTTP 500/);
+ const checkpoint=JSON.parse(await readFile(path.join(root,'jobs',rejected.job.id,'checkpoint.json')));
+ assert.equal(checkpoint['shot-one'].submitting,failure!==400);
+ if(failure===400){
+  assert.equal(checkpoint['shot-one'].videoRejection.status,400);
+  await processEditJob(rejected,api,{fetchImpl:async(url,options)=>{if(url.endsWith('/image_to_video'))calls++;return fakeFetch(url,options);},pause:async()=>{}});
+  assert.equal(calls,2);
+ }else{
+  await assert.rejects(()=>processEditJob(rejected,api,{fetchImpl:rejectFetch,pause:async()=>{}}),/unknown for shot 1/);
+  assert.equal(calls,1);
+ }
+}
+console.log('PASS: Runway HTTP 400 records a definitive rejection and permits explicit resume; ambiguous submissions remain blocked.');
 const imageRecoveryFolder=path.join(root,'jobs',imageRecovery.job.id);await mkdir(imageRecoveryFolder,{recursive:true});await writeFile(path.join(imageRecoveryFolder,'checkpoint.json'),JSON.stringify({'shot-one':{frameSubmitting:true}}));
 let recoveryImages=0,recoveryVideos=0;
 const recoveryFetch=async(url,options)=>{if(url.endsWith('/images/edits'))recoveryImages++;if(url.endsWith('/image_to_video'))recoveryVideos++;return fakeFetch(url,options);};

@@ -1,3 +1,4 @@
+import {videoRate as modelVideoRate,videoSeconds,frameInput,motionPrompt,motionInput} from './realism.mjs';
 import {mkdir,readFile,writeFile,rename,stat,copyFile} from 'node:fs/promises';
 import path from 'node:path';
 import {speechRequest,requireVoiceCredentials} from './voice-provider.mjs';
@@ -23,11 +24,11 @@ export async function processEditJob(work,api,{fetchImpl=fetch,pause=delay}={}){
   const publish=async(file,name,type)=>{const key=`local/videos/${job.id}/${name}`,dest=path.join(root,'media',...key.split('/'));await mkdir(path.dirname(dest),{recursive:true});await copyFile(file,dest);await writeFile(dest+'.metadata.json',JSON.stringify({contentType:type}));return '/api/files/'+key;};
   const speech=structuredClone(content.speech||[]);
   if(job.kind==='AUDIO'){
-    requireVoiceCredentials(content.snapshot);
+    if(speech.length)requireVoiceCredentials(content.snapshot);
     const costKey=content.snapshot.voice.provider==='elevenlabs'?'ELEVENLABS_TTS_COST_ESTIMATE':'TTS_COST_ESTIMATE';
-    const unit=Number(process.env[costKey]);if(!(unit>0))throw Error(`Set ${costKey} to a conservative per-segment estimate.`);
-    const pending=speech.filter(s=>!s.audioUrl).length,cost=pending*unit*2;
-    if(cost>settings.maxJobCost)throw Error('Audio estimate (including one defective-response retry) exceeds the job budget.');
+    const unit=content.realismVersion?Math.max(.10,Number(process.env[costKey])||0):Number(process.env[costKey]);if(speech.length&&!(unit>0))throw Error(`Set ${costKey} to a conservative per-segment estimate.`);
+    const pending=speech.filter(s=>!s.audioUrl).length,cost=pending?pending*unit*2:0;
+    if(cost+(job.priorCost||0)>(content.realismVersion?Math.min(10,settings.maxJobCost):settings.maxJobCost))throw Error('Audio estimate (including one defective-response retry) exceeds the job budget.');
     await progress('Validating voice performances',5,{cost});
     for(let i=0;i<speech.length;i++){
       const segment=speech[i],file=path.join(dir,`voice-${i}.mp3`),input=speechInput(segment,content.snapshot,settings.ttsModel),inputHash=hash(input);
@@ -67,22 +68,23 @@ export async function processEditJob(work,api,{fetchImpl=fetch,pause=delay}={}){
   let sourceWork,sourceCheckpoint={};
   if(job.sourceJobId){if(!/^[a-zA-Z0-9_-]+$/.test(job.sourceJobId))throw Error('Invalid source job.');try{sourceWork=JSON.parse(await readFile(path.join(root,'jobs',job.sourceJobId,'job.json'),'utf8'));sourceCheckpoint=JSON.parse(await readFile(path.join(root,'jobs',job.sourceJobId,'checkpoint.json'),'utf8'));}catch{}}
   const rawFiles=new Map();let cost=0;
-  const videoRate=Number(process.env.VIDEO_COST_PER_SECOND),imageRate=Number(process.env.IMAGE_COST_ESTIMATE),lipRate=Number(process.env.LIPSYNC_COST_PER_SECOND);
+  const videoRate=content.realismVersion?modelVideoRate(settings.videoModel):Number(process.env.VIDEO_COST_PER_SECOND),imageRate=Number(process.env.IMAGE_COST_ESTIMATE),lipRate=Number(process.env.LIPSYNC_COST_PER_SECOND);
   for(let i=0;i<content.scenes.length;i++){
     const shot=content.scenes[i],clip=plan.clips[i];let raw=path.join(dir,`raw-${i}.mp4`);
     const oldIndex=sourceWork?.content?.scenes?.findIndex(s=>s.id===shot.id)??-1;
     const old=oldIndex>=0?sourceWork.content.scenes[oldIndex]:null;
     // Compare visual inputs; upgrading old dialogue-only shots to voiceover does not change saved footage.
-    const comparable=s=>({location:s.location,wardrobe:s.wardrobe,action:s.action,camera:s.camera,lighting:s.lighting});
+    const comparable=s=>({...((s.frameUrl)?{frameUrl:s.frameUrl}:{}),location:s.location,wardrobe:s.wardrobe,action:s.action,camera:s.camera,lighting:s.lighting});
     if(!await exists(raw)&&shot.sourceUrl)await writeFile(raw,(await reference(shot.sourceUrl)).bytes);
-    if(!await exists(raw)&&old&&!old.sourceUrl&&hash(comparable(old))===hash(comparable(shot))&&hash(sourceWork.content.snapshot.appearance)===hash(content.snapshot.appearance)){
+    if(!await exists(raw)&&content.realismVersion&&shot.rawUrl&&shot.rawKey===JSON.stringify(motionInput(shot,settings.videoModel)))await writeFile(raw,(await reference(shot.rawUrl)).bytes);
+    if(!content.realismVersion&&!await exists(raw)&&old&&!old.sourceUrl&&hash(comparable(old))===hash(comparable(shot))&&hash(sourceWork.content.snapshot.appearance)===hash(content.snapshot.appearance)){
       const source=path.join(root,'jobs',job.sourceJobId,`raw-${oldIndex}.mp4`);if(await exists(source)){await validateVideo(source);await copyFile(source,raw);}
     }
     if(await exists(raw)){await validateVideo(raw);rawFiles.set(shot.id,raw);}
-    else{if(job.kind==='REBUILD')throw Error(`Saved footage for shot ${i+1} is unavailable or its visuals changed. Generate a new video to create footage.`);if(shot.kind==='screen')throw Error('Upload the app recording before generation.');if(clip.sourceIn+clip.duration>10.01)throw Error(`Shot ${i+1} exceeds 10 seconds after audio timing. Split it into shorter shots sharing the same speech segment.`);if(!(videoRate>0)||!(imageRate>0))throw Error('Set conservative VIDEO_COST_PER_SECOND and IMAGE_COST_ESTIMATE values.');cost+=(clip.sourceIn+clip.duration<=5?5:10)*videoRate+imageRate;}
+    else{if(job.kind==='REBUILD')throw Error(`Saved footage for shot ${i+1} is unavailable or its visuals changed. Generate a new video to create footage.`);if(shot.kind==='screen')throw Error('Upload the app recording before generation.');if(clip.sourceIn+clip.duration>10.01)throw Error(`Shot ${i+1} exceeds 10 seconds after audio timing. Split it into shorter shots sharing the same speech segment.`);if(!(videoRate>0)||(!shot.frameUrl&&!(imageRate>0)))throw Error('Set conservative VIDEO_COST_PER_SECOND and IMAGE_COST_ESTIMATE values.');cost+=videoSeconds(clip.sourceIn+clip.duration)*videoRate+(shot.frameUrl?0:imageRate);}
     if(shot.kind==='speaking'){if(!process.env.LIPSYNC_API_KEY)throw Error('Speaking shots require LIPSYNC_API_KEY. Choose voiceover shots for a narration-only edit.');if(!(lipRate>0))throw Error('Set LIPSYNC_COST_PER_SECOND before paid lip sync.');cost+=clip.duration*lipRate;}
   }
-  if(cost>settings.maxJobCost)throw Error('Estimated video and lip-sync cost exceeds the job budget.');await progress('Preparing audio-timed shots',5,{cost});
+  if(cost+(job.priorCost||0)>(content.realismVersion?Math.min(10,settings.maxJobCost):settings.maxJobCost))throw Error('Estimated video and lip-sync cost exceeds the job budget.');await progress('Preparing audio-timed shots',5,{cost});
   const referenceCache=new Map();
   const runwayHeaders={'X-Runway-Version':'2024-11-06'};
   const statusRetry=label=>async({attempt,total,reason})=>progress(`${label}: retry ${attempt+1}/${total} (${reason})`,5);
@@ -97,6 +99,7 @@ export async function processEditJob(work,api,{fetchImpl=fetch,pause=delay}={}){
     if(!rawFiles.has(shot.id)){
       if(!process.env.VIDEO_API_KEY||!process.env.IMAGE_API_KEY)throw Error('VIDEO_API_KEY and IMAGE_API_KEY are required for new footage.');
       const frame=path.join(dir,`frame-${i}.png`);
+      if(content.realismVersion){if(!shot.frameApproved||!shot.frameUrl||shot.frameHash!==hash(frameInput(shot,content.snapshot,settings.imageModel)))throw Error(`Review and approve the current starting frame for shot ${i+1} first.`);if(!await exists(frame))await writeFile(frame,(await reference(shot.frameUrl)).bytes);}
       if(!await exists(frame)){
         await progress(`Starting frame ${i+1}`,10+i/content.scenes.length*60);
         if(state.frameSubmitting)throw Error(`Starting frame submission outcome is unknown for shot ${i+1}. Import a saved starting image or authorize its retry in the recovery panel. Existing paid outputs are preserved.`);
@@ -108,12 +111,13 @@ export async function processEditJob(work,api,{fetchImpl=fetch,pause=delay}={}){
         const data=await (await provider('https://api.openai.com/v1/images/edits',process.env.IMAGE_API_KEY,form)).json();
         await writeFile(frame+'.tmp',Buffer.from(data.data[0].b64_json,'base64'));await rename(frame+'.tmp',frame);state.frameSubmitting=false;await save();
       }
-      if(!state.taskId){if(state.submitting)throw Error('Video submission outcome is unknown. Check provider history; do not repeat the paid request.');await progress(`Submitting shot ${i+1}`,10+i/content.scenes.length*60);state.submitting=true;await save();const data=await (await provider('https://api.dev.runwayml.com/v1/image_to_video',process.env.VIDEO_API_KEY,{model:settings.videoModel,promptImage:`data:image/png;base64,${(await readFile(frame)).toString('base64')}`,promptText:`Action: ${shot.action}. Camera: ${shot.camera}. Natural subtle movement, preserve identity, wardrobe and surroundings. One continuous candid phone video. ${shot.kind==='speaking'?'Face remains clearly visible, natural restrained expression.':'The person is not talking; relaxed closed mouth. No lip movements imitating speech.'}`.slice(0,1000),duration:clip.sourceIn+clip.duration<=5?5:10,ratio:'720:1280'},runwayHeaders)).json();state.taskId=data.id;state.submitting=false;await save();}
-      for(let tries=0;!state.output&&tries<240;tries++){await progress(`Generating shot ${i+1}`,15+i/content.scenes.length*60);const result=await runwayTask(state.taskId);if(result.status==='SUCCEEDED'){state.output=result.output?.[0];await save();break;}if(['FAILED','CANCELLED','CANCELED'].includes(result.status)){await writeFile(path.join(dir,`runway-shot-${i}-failure.json`),JSON.stringify(result,null,2));throw Error(`Runway shot ${i+1} failed: ${result.failureCode||'unknown'} (${state.taskId}).`);}await delay(5000);}
+      if(!state.taskId){if(state.submitting)throw Error(`Video submission outcome is unknown for shot ${i+1}. Check provider history; do not repeat the paid request.`);await progress(`Submitting shot ${i+1}`,10+i/content.scenes.length*60);state.submitting=true;await save();let data;try{data=await (await provider('https://api.dev.runwayml.com/v1/image_to_video',process.env.VIDEO_API_KEY,{model:settings.videoModel,promptImage:`data:image/png;base64,${(await readFile(frame)).toString('base64')}`,promptText:content.realismVersion?motionPrompt(shot):`Action: ${shot.action}. Camera: ${shot.camera}. Natural subtle movement, preserve identity, wardrobe and surroundings. One continuous candid phone video. ${shot.kind==='speaking'?'Face remains clearly visible, natural restrained expression.':'The person is not talking; relaxed closed mouth. No lip movements imitating speech.'}`.slice(0,1000),duration:clip.sourceIn+clip.duration<=5?5:10,ratio:'720:1280'},runwayHeaders)).json();}catch(error){if([400,401,402,403,404,405,413,415,422].includes(error.status)){state.submitting=false;state.videoRejection={status:error.status,at:new Date().toISOString()};await save();throw Error(`Runway rejected shot ${i+1} (HTTP ${error.status}). Check credits, account access and request inputs, then resume the saved job. Completed clips are preserved.`);}throw error;}if(typeof data?.id!=='string'||!data.id.trim())throw Error('Video submission outcome is unknown: provider returned no task ID. Check provider history before retrying.');state.taskId=data.id;state.submitting=false;delete state.videoRejection;await save();}
+      for(let tries=0;!state.output&&tries<240;tries++){await progress(`Generating shot ${i+1}`,15+i/content.scenes.length*60);const result=await runwayTask(state.taskId);if(result.status==='SUCCEEDED'){state.output=result.output?.[0];await save();break;}if(['FAILED','CANCELLED','CANCELED'].includes(result.status)){await writeFile(path.join(dir,`runway-shot-${i}-failure.json`),JSON.stringify(result,null,2));throw Error(`Runway shot ${i+1} failed: ${result.failureCode||'unknown'} (${state.taskId}).`);}await pause(5000);}
       if(!state.output)throw Error('Video task is still pending. Resume to keep polling the saved task.');
       await progress(`Downloading saved shot ${i+1}`,20+i/content.scenes.length*60);
       await download(raw,state.output,{fetchImpl,pause,onRetry:downloadRetry(`Downloading saved shot ${i+1}`,20+i/content.scenes.length*60),refresh:async()=>{const data=await runwayTask(state.taskId);if(!data.output?.[0])throw Error('Task has no downloadable output.');state.output=data.output[0];await save();return state.output;}});rawFiles.set(shot.id,raw);
     }
+    if(content.realismVersion&&!shot.sourceUrl){const rawUrl=await publish(raw,`raw-${i}.mp4`,'video/mp4');await progress(`Shot ${i+1} saved`,20+i/content.scenes.length*60,{rawShot:{id:shot.id,rawUrl,rawKey:JSON.stringify(motionInput(shot,settings.videoModel))}});}
     const available=await validateVideo(raw);if(available+.05<clip.sourceIn+clip.duration)throw Error(`Shot ${i+1} has ${available.toFixed(2)}s of saved footage but needs ${(clip.sourceIn+clip.duration).toFixed(2)}s. Shorten/split the shot; audio will not be truncated.`);
     const prepared=path.join(dir,`prepared-${i}.mp4`),editHash=hash({visualHash,sourceIn:clip.sourceIn,duration:clip.duration,rawSize:(await stat(raw)).size,sourceUrl:shot.sourceUrl});
     if(!await exists(prepared)||state.editHash!==editHash){await progress(`Editing shot ${i+1}`,25+i/content.scenes.length*60);await run(['-y','-ss',String(clip.sourceIn),'-i',raw,'-t',String(clip.duration),'-an','-vf','scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,setpts=PTS-STARTPTS','-c:v','libx264','-preset','fast','-crf','19','-pix_fmt','yuv420p',prepared+'.tmp.mp4']);await rename(prepared+'.tmp.mp4',prepared);state.editHash=editHash;state.lipHash=undefined;await save();}
@@ -153,7 +157,7 @@ export async function processEditJob(work,api,{fetchImpl=fetch,pause=delay}={}){
     // All sources, including lip-sync outputs, have identical video timestamps and no competing audio.
     const normalizedFile=path.join(dir,`scene-${i}.mp4`);
     const normalizedHash=hash({editHash,lip:shot.kind==='speaking'?state.syncedHash:null});
-    if(!await exists(normalizedFile)||state.normalizedHash!==normalizedHash){await run(['-y','-i',visual,'-t',String(clip.duration),'-an','-vf','scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,setpts=PTS-STARTPTS','-c:v','libx264','-preset','fast','-crf','19','-pix_fmt','yuv420p',normalizedFile+'.tmp.mp4']);await rename(normalizedFile+'.tmp.mp4',normalizedFile);state.normalizedHash=normalizedHash;await save();}
+    if(!await exists(normalizedFile)||state.normalizedHash!==normalizedHash){if(visual===prepared){await copyFile(prepared,normalizedFile+'.tmp.mp4');}else await run(['-y','-i',visual,'-t',String(clip.duration),'-an','-vf','scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,setpts=PTS-STARTPTS','-c:v','libx264','-preset','fast','-crf','19','-pix_fmt','yuv420p',normalizedFile+'.tmp.mp4']);await rename(normalizedFile+'.tmp.mp4',normalizedFile);state.normalizedHash=normalizedHash;await save();}
     normalized.push(`scene-${i}.mp4`);
   }
   await progress('Mixing uninterrupted speech and rendering export',90);
